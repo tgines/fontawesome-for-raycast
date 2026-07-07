@@ -3,13 +3,18 @@ import {
   Action,
   ActionPanel,
   Color,
+  Grid,
   Icon as RaycastIcon,
-  List,
   getPreferenceValues,
   openExtensionPreferences,
 } from "@raycast/api";
 import { usePromise, showFailureToast } from "@raycast/utils";
 import { searchIcons, type Icon } from "./fontawesome";
+
+// ~8 columns keeps cells near 80px wide in the default Raycast window; the glyph
+// is shrunk to roughly half the cell via a large inset. Raycast sizes cells by
+// column count, not fixed pixels, so this is the closest to an 80px cell / 40px icon.
+const COLUMNS = 8;
 
 /** Debounce a fast-changing value so we don't hit the API on every keystroke. */
 function useDebounced<T>(value: T, delay = 300): T {
@@ -39,7 +44,11 @@ export default function Command() {
   const results = icons ?? [];
 
   return (
-    <List
+    <Grid
+      columns={COLUMNS}
+      aspectRatio="1"
+      fit={Grid.Fit.Contain}
+      inset={Grid.Inset.Large}
       isLoading={isLoading}
       searchText={searchText}
       onSearchTextChange={setSearchText}
@@ -47,7 +56,7 @@ export default function Command() {
       throttle
     >
       {!apiToken ? (
-        <List.EmptyView
+        <Grid.EmptyView
           icon={RaycastIcon.Key}
           title="Add your API token"
           description="Open preferences and paste your Font Awesome API token to start searching."
@@ -58,7 +67,7 @@ export default function Command() {
           }
         />
       ) : query.trim() === "" ? (
-        <List.EmptyView
+        <Grid.EmptyView
           icon={RaycastIcon.MagnifyingGlass}
           title="Search Font Awesome"
           description="Type an icon name or alias (e.g. user, coffee, arrow)."
@@ -66,7 +75,7 @@ export default function Command() {
       ) : (
         results.map((icon) => <IconItem key={icon.id} icon={icon} />)
       )}
-    </List>
+    </Grid>
   );
 }
 
@@ -75,11 +84,12 @@ function IconItem({ icon }: { icon: Icon }) {
   const unicode = `\\${icon.unicode}`;
 
   return (
-    <List.Item
-      icon={{ source: svgDataUri(icon.svg), tintColor: Color.PrimaryText }}
-      title={icon.label}
-      subtitle={icon.id}
-      accessories={[{ text: unicode }]}
+    <Grid.Item
+      content={{
+        value: { source: svgDataUri(icon.svg), tintColor: Color.PrimaryText },
+        tooltip: icon.label,
+      }}
+      title={icon.id}
       keywords={[icon.id]}
       actions={
         <ActionPanel>
