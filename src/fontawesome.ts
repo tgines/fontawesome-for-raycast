@@ -116,43 +116,120 @@ async function getLatestVersion(): Promise<string> {
   return version;
 }
 
-interface SearchIcon {
+// -----------------------------------------------------------------------------
+// Local metadata index
+//
+// The GraphQL `search` field is fuzzy ("word associations, beyond simple text
+// matching") and does not return the icons the fontawesome.com results show
+// (e.g. "grid" surfaces grin-*/grip- but not `grid` itself). So instead we pull
+// the full Classic/Regular catalog once, cache it, and search it locally with
+// plain substring/alias matching + ranking — which mirrors the website.
+// -----------------------------------------------------------------------------
+
+const INDEX_KEY = "fa-index";
+const INDEX_VERSION_KEY = "fa-index-version";
+const INDEX_EXPIRY_KEY = "fa-index-expiry";
+const SVG_CACHE_KEY = "fa-svg-cache";
+
+const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
+const PAGE_SIZE = 500;
+// Max results rendered per search, and how many icon+svg selections to batch
+// into one aliased GraphQL request when fetching their SVGs.
+const MAX_RESULTS = 60;
+const SVG_BATCH = 10;
+
+interface IconMeta {
   id: string;
   label: string;
   unicode: string;
-  aliases: { names: string[] | null } | null;
-  svgs: { html: string }[];
+  aliases: string[];
 }
 
-const SEARCH_QUERY = `
-  query Search($version: String!, $query: String!, $first: Int!) {
-    search(version: $version, query: $query, first: $first) {
-      id
-      label
-      unicode
-      aliases {
-        names
-      }
-      svgs(filter: { familyStyles: [{ family: CLASSIC, style: REGULAR }] }) {
-        html
+interface PageIcon {
+  id: string;
+  label: string;
+  unicodeHex: string;
+  aliases: { names: string[] | null } | null;
+  familyStylesByLicense: { pro: { family: string; style: string }[] };
+}
+
+const INDEX_QUERY = `
+  query Catalog($version: String!, $page: Int!, $pageSize: Int!) {
+    release(version: $version) {
+      iconsPaginated(license: PRO, page: $page, pageSize: $pageSize) {
+        totalPageCount
+        icons {
+          id
+          label
+          unicodeHex
+          aliases {
+            names
+          }
+          familyStylesByLicense {
+            pro {
+              family
+              style
+            }
+          }
+        }
       }
     }
   }
 `;
 
+function hasClassicRegular(icon: PageIcon): boolean {
+  return icon.familyStylesByLicense.pro.some((fs) => fs.family === "classic" && fs.style === "regular");
+}
+
+/** Fetch every Classic/Regular icon's metadata (paged), cached for a day. */
+async function getIndex(): Promise<IconMeta[]> {
+  const version = await getLatestVersion();
+  const cachedVersion = await LocalStorage.getItem<string>(INDEX_VERSION_KEY);
+  const expiry = await LocalStorage.getItem<number>(INDEX_EXPIRY_KEY);
+  const cached = await LocalStorage.getItem<string>(INDEX_KEY);
+  if (cached && cachedVersion === version && expiry && Date.now() < expiry) {
+    return JSON.parse(cached) as IconMeta[];
+  }
+
+  const index: IconMeta[] = [];
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const data = await graphql<{
+      release: { iconsPaginated: { totalPageCount: number; icons: PageIcon[] } };
+    }>(INDEX_QUERY, { version, page, pageSize: PAGE_SIZE });
+
+    const paginated = data.release.iconsPaginated;
+    totalPages = paginated.totalPageCount;
+    for (const icon of paginated.icons) {
+      if (!hasClassicRegular(icon)) continue;
+      index.push({
+        id: icon.id,
+        label: icon.label,
+        unicode: icon.unicodeHex,
+        aliases: icon.aliases?.names ?? [],
+      });
+    }
+    page += 1;
+  } while (page <= totalPages);
+
+  await LocalStorage.setItem(INDEX_KEY, JSON.stringify(index));
+  await LocalStorage.setItem(INDEX_VERSION_KEY, version);
+  await LocalStorage.setItem(INDEX_EXPIRY_KEY, Date.now() + INDEX_TTL_MS);
+  return index;
+}
+
 /**
  * Rank a match the way the fontawesome.com results feel: exact id, then id
  * prefix, then id substring, then label, then alias. Lower is better.
- * Returns null when the query doesn't textually appear anywhere — that filters
- * out the fuzzy/typo-tolerant matches the API mixes in (e.g. "grin" for "grid").
+ * Returns null when no query token appears anywhere (not a match).
  */
-function rankIcon(icon: SearchIcon, tokens: string[], full: string): number | null {
+function rankIcon(icon: IconMeta, tokens: string[], full: string): number | null {
   const id = icon.id.toLowerCase();
   const label = icon.label.toLowerCase();
-  const aliases = (icon.aliases?.names ?? []).map((n) => n.toLowerCase());
+  const aliases = icon.aliases.map((n) => n.toLowerCase());
   const haystack = [id, label, ...aliases].join(" ");
 
-  // Every whitespace-separated token must appear somewhere, else it's fuzzy noise.
   if (!tokens.every((t) => haystack.includes(t))) {
     return null;
   }
@@ -165,36 +242,75 @@ function rankIcon(icon: SearchIcon, tokens: string[], full: string): number | nu
   return 5; // tokens matched separately but not as a whole phrase
 }
 
+/** Fetch <svg> markup for a set of ids (Classic/Regular), batched and cached. */
+async function getSvgs(ids: string[]): Promise<Record<string, string>> {
+  const rawCache = await LocalStorage.getItem<string>(SVG_CACHE_KEY);
+  const cache: Record<string, string> = rawCache ? JSON.parse(rawCache) : {};
+
+  const missing = ids.filter((id) => !(id in cache));
+  if (missing.length > 0) {
+    const version = await getLatestVersion();
+    const chunks: string[][] = [];
+    for (let i = 0; i < missing.length; i += SVG_BATCH) {
+      chunks.push(missing.slice(i, i + SVG_BATCH));
+    }
+
+    const results = await Promise.all(
+      chunks.map(async (chunk) => {
+        const fields = chunk
+          .map(
+            (id, i) =>
+              `i${i}: icon(name: ${JSON.stringify(id)}) { svgs(filter: { familyStyles: [{ family: CLASSIC, style: REGULAR }] }) { html } }`,
+          )
+          .join("\n");
+        const query = `query Svgs($version: String!) { release(version: $version) { ${fields} } }`;
+        const data = await graphql<{ release: Record<string, { svgs: { html: string }[] } | null> }>(query, {
+          version,
+        });
+        return chunk.map((id, i) => ({ id, html: data.release[`i${i}`]?.svgs?.[0]?.html ?? "" }));
+      }),
+    );
+
+    for (const group of results) {
+      for (const { id, html } of group) {
+        if (html) cache[id] = html;
+      }
+    }
+    await LocalStorage.setItem(SVG_CACHE_KEY, JSON.stringify(cache));
+  }
+
+  return cache;
+}
+
 /**
- * Search icons by name/alias, restricted to the Classic / Regular style.
- * Icons without a Classic-Regular variant, and fuzzy non-substring matches,
- * are dropped; the rest are ranked to mirror fontawesome.com's ordering.
+ * Search Classic/Regular icons by name, label, and alias — locally, over the
+ * cached catalog — then attach SVG markup for the top matches.
  */
-export async function searchIcons(query: string, first = 100): Promise<Icon[]> {
+export async function searchIcons(query: string): Promise<Icon[]> {
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
   }
 
-  const version = await getLatestVersion();
-  const data = await graphql<{ search: SearchIcon[] }>(SEARCH_QUERY, {
-    version,
-    query: trimmed,
-    first,
-  });
-
+  const index = await getIndex();
   const full = trimmed.toLowerCase();
   const tokens = full.split(/\s+/).filter(Boolean);
 
-  return data.search
-    .filter((icon) => icon.svgs.length > 0)
+  const ranked = index
     .map((icon) => ({ icon, rank: rankIcon(icon, tokens, full) }))
-    .filter((entry): entry is { icon: SearchIcon; rank: number } => entry.rank !== null)
+    .filter((entry): entry is { icon: IconMeta; rank: number } => entry.rank !== null)
     .sort((a, b) => a.rank - b.rank || a.icon.id.length - b.icon.id.length || a.icon.id.localeCompare(b.icon.id))
-    .map(({ icon }) => ({
+    .slice(0, MAX_RESULTS)
+    .map((entry) => entry.icon);
+
+  const svgs = await getSvgs(ranked.map((icon) => icon.id));
+
+  return ranked
+    .filter((icon) => svgs[icon.id])
+    .map((icon) => ({
       id: icon.id,
       label: icon.label,
       unicode: icon.unicode,
-      svg: icon.svgs[0].html,
+      svg: svgs[icon.id],
     }));
 }

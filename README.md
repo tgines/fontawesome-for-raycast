@@ -40,11 +40,21 @@ Requires the [Raycast](https://raycast.com) app and Node 20+.
 
 ## How it works
 
-- `src/fontawesome.ts` — token exchange, access-token + version caching (in `LocalStorage`),
-  and the GraphQL `search` query filtered to `family: CLASSIC, style: REGULAR`.
-- `src/search-icons.tsx` — the debounced list view and copy/paste actions.
+The GraphQL `search` field is fuzzy ("word associations, beyond simple text matching")
+and doesn't match the fontawesome.com results — e.g. `grid` surfaces `grin-*`/`grip-*`
+but not `grid` itself. So instead:
 
-The search `version` is resolved from `release(version: "latest")` and cached for a day,
+- `src/fontawesome.ts`
+  - Exchanges the API token for a short-lived access token (cached in `LocalStorage`).
+  - Builds a **local index** of every Classic/Regular icon (id, label, aliases, unicode)
+    via `release.iconsPaginated(license: PRO)`, cached for a day. ~1,900 icons, ~4 requests.
+  - Searches that index locally with plain substring/alias matching and ranking
+    (exact id → prefix → substring → label → alias), mirroring the website.
+  - Fetches `<svg>` markup only for the visible matches, in one batched aliased query,
+    cached per icon so repeat searches are instant.
+- `src/search-icons.tsx` — the debounced grid view and copy/paste actions.
+
+The release `version` is resolved from `release(version: "latest")` and cached for a day,
 so results track the newest Font Awesome release automatically.
 
 ## Notes
