@@ -126,9 +126,10 @@ async function getLatestVersion(): Promise<string> {
 // plain substring/alias matching + ranking — which mirrors the website.
 // -----------------------------------------------------------------------------
 
-const INDEX_KEY = "fa-index";
-const INDEX_VERSION_KEY = "fa-index-version";
-const INDEX_EXPIRY_KEY = "fa-index-expiry";
+// Bump the version suffix on the schema/query change so stale caches rebuild.
+const INDEX_KEY = "fa-index-v2";
+const INDEX_VERSION_KEY = "fa-index-v2-version";
+const INDEX_EXPIRY_KEY = "fa-index-v2-expiry";
 const SVG_CACHE_KEY = "fa-svg-cache";
 
 const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
