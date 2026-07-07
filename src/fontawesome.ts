@@ -156,7 +156,7 @@ interface PageIcon {
 const INDEX_QUERY = `
   query Catalog($version: String!, $page: Int!, $pageSize: Int!) {
     release(version: $version) {
-      iconsPaginated(license: PRO, page: $page, pageSize: $pageSize) {
+      iconsPaginated(license: ANY, page: $page, pageSize: $pageSize) {
         totalPageCount
         icons {
           id

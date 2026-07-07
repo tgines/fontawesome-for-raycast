@@ -47,7 +47,8 @@ but not `grid` itself. So instead:
 - `src/fontawesome.ts`
   - Exchanges the API token for a short-lived access token (cached in `LocalStorage`).
   - Builds a **local index** of every Classic/Regular icon (id, label, aliases, unicode)
-    via `release.iconsPaginated(license: PRO)`, cached for a day. ~1,900 icons, ~4 requests.
+    via `release.iconsPaginated(license: ANY)` — free + pro, since the `PRO` filter is
+    *pro-exclusive* and would drop the ~1,900 free icons. Cached for a day.
   - Searches that index locally with plain substring/alias matching and ranking
     (exact id → prefix → substring → label → alias), mirroring the website.
   - Fetches `<svg>` markup only for the visible matches, in one batched aliased query,
