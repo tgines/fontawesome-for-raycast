@@ -120,6 +120,7 @@ interface SearchIcon {
   id: string;
   label: string;
   unicode: string;
+  aliases: { names: string[] | null } | null;
   svgs: { html: string }[];
 }
 
@@ -129,6 +130,9 @@ const SEARCH_QUERY = `
       id
       label
       unicode
+      aliases {
+        names
+      }
       svgs(filter: { familyStyles: [{ family: CLASSIC, style: REGULAR }] }) {
         html
       }
@@ -137,10 +141,36 @@ const SEARCH_QUERY = `
 `;
 
 /**
- * Search icons by name/alias, restricted to the Classic / Regular style.
- * Icons without a Classic-Regular variant are dropped.
+ * Rank a match the way the fontawesome.com results feel: exact id, then id
+ * prefix, then id substring, then label, then alias. Lower is better.
+ * Returns null when the query doesn't textually appear anywhere — that filters
+ * out the fuzzy/typo-tolerant matches the API mixes in (e.g. "grin" for "grid").
  */
-export async function searchIcons(query: string, first = 50): Promise<Icon[]> {
+function rankIcon(icon: SearchIcon, tokens: string[], full: string): number | null {
+  const id = icon.id.toLowerCase();
+  const label = icon.label.toLowerCase();
+  const aliases = (icon.aliases?.names ?? []).map((n) => n.toLowerCase());
+  const haystack = [id, label, ...aliases].join(" ");
+
+  // Every whitespace-separated token must appear somewhere, else it's fuzzy noise.
+  if (!tokens.every((t) => haystack.includes(t))) {
+    return null;
+  }
+
+  if (id === full) return 0;
+  if (id.startsWith(full)) return 1;
+  if (id.includes(full)) return 2;
+  if (label.includes(full)) return 3;
+  if (aliases.some((a) => a.includes(full))) return 4;
+  return 5; // tokens matched separately but not as a whole phrase
+}
+
+/**
+ * Search icons by name/alias, restricted to the Classic / Regular style.
+ * Icons without a Classic-Regular variant, and fuzzy non-substring matches,
+ * are dropped; the rest are ranked to mirror fontawesome.com's ordering.
+ */
+export async function searchIcons(query: string, first = 100): Promise<Icon[]> {
   const trimmed = query.trim();
   if (!trimmed) {
     return [];
@@ -153,9 +183,15 @@ export async function searchIcons(query: string, first = 50): Promise<Icon[]> {
     first,
   });
 
+  const full = trimmed.toLowerCase();
+  const tokens = full.split(/\s+/).filter(Boolean);
+
   return data.search
     .filter((icon) => icon.svgs.length > 0)
-    .map((icon) => ({
+    .map((icon) => ({ icon, rank: rankIcon(icon, tokens, full) }))
+    .filter((entry): entry is { icon: SearchIcon; rank: number } => entry.rank !== null)
+    .sort((a, b) => a.rank - b.rank || a.icon.id.length - b.icon.id.length || a.icon.id.localeCompare(b.icon.id))
+    .map(({ icon }) => ({
       id: icon.id,
       label: icon.label,
       unicode: icon.unicode,
